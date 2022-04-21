@@ -1,5 +1,6 @@
 # sars2-mts-saliva-comp
 "The Comparison Between Saliva and Mid-Turbinate Swabs in the Detection of COVID-19", Jianyu Lai, Jennifer German, Filbert Hong, S.-H. Sheldon Tai, Donald K. Milton, for the University of Maryland StopCOVID Research Group*
+https://doi.org/10.1128/spectrum.00128-22
 
 Overview:
 Source data (participant demographics and symptoms, PCR data) are cleaned and merged in salivaswab_source_final.Rmd.
