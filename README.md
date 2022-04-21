@@ -4,7 +4,7 @@ Overview:
 Source data (participant demographics and symptoms, PCR data) are cleaned and merged in salivaswab_source_final.Rmd.
 Resulting datasets are analyzed in figure and table scripts in data_analysis/scripts and outputted to data_analysis/output
 
-The source data for these analyses come from the StopCOVID study, which are elaborated on at the public github https://fhong94.github.io/sars2-shedding-phablab-umd/
+The source data for these analyses come from the StopCOVID study, which are elaborated on at the public github https://phablab-umd.github.io/sars2-shedding/
 
 ## Source files:
 1. ncovPCRtempsxresults1_210805.csv - PCR experiment information (merged with some clinical data: temp, sx) - version pulled on 8/5/2021
