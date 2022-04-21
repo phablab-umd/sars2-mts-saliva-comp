@@ -1,0 +1,146 @@
+---
+title: "table_2_3"
+author: "Jianyu"
+date: "9/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(skimr)
+library(sjPlot)
+library(lattice) # required for caret package
+library(caret) 
+library(psych)
+set.seed(42)
+```
+
+
+```{r}
+pcr_screen_salivaswab <- read.csv(file = "../data/pcr_screen_salivaswab_1.csv")
+demo <- readRDS("../data/demohist_salivaswab_1.RDS")
+
+#extract the real_onset from the "demo" dataset and join to the pcr_screen_salivaswab
+demo <- demo %>% select(study_id, real_onset)
+pcr_screen_salivaswab <- pcr_screen_salivaswab %>% 
+  mutate(study_id=as.character(study_id)) %>% 
+  left_join(demo, by="study_id")
+
+
+#create a dataset containing only paired saliva and mt
+MT <- pcr_screen_salivaswab %>% filter(sample_type == "Midturbinate Swab") %>% select(study_id, sample_date)
+saliva <- pcr_screen_salivaswab %>% filter(sample_type == "Saliva") %>% select(study_id, sample_date)
+MT_SALIVA <- left_join(intersect(MT, saliva), pcr_screen_salivaswab, by=c("study_id","sample_date"))  %>% filter(sample_type %in% c("Saliva","Midturbinate Swab"))
+
+#create "pos" variable indicating positivity
+ctscreencols <- c("ct_ngene_screen","ct_sgene_screen","ct_orf1ab_screen")
+MT_SALIVA$pos <- MT_SALIVA[,ctscreencols] %>% apply(c(1,2),function(x) {x<40}) %>% apply(1,function(x) {sum(x)>=2})
+
+MT_SALIVA <- MT_SALIVA %>% 
+  mutate(positivity = as.factor(if_else(pos==TRUE, 1, 0)))
+
+#Create an indicator for symptomatic or not
+MT_SALIVA <- MT_SALIVA %>% 
+  mutate(symptom = if_else(is.na(real_onset), 0, 1))
+
+#create a list of people who became positive by either test
+positive_list <- MT_SALIVA %>% 
+  filter(pos == TRUE) %>% 
+  select(study_id) %>% 
+  unique()
+
+#subset the MT_SALIVA dataset to only those became positive later
+MT_SALIVA_POSITIVE <- MT_SALIVA %>% 
+  right_join(positive_list)
+
+length(unique(MT_SALIVA_POSITIVE$study_id))
+
+```
+
+#create another dataset having saliva positivity values left join the MT dataset
+#(wide format of the dataset created in the previous step)
+```{r}
+saliva_ct<- MT_SALIVA %>% 
+  filter(sample_type == "Saliva") %>% 
+  select(study_id, sample_date, positivity, ct_avg_screen) %>% 
+  rename(positivity_saliva = positivity, 
+         ct_avg_screen_saliva=ct_avg_screen)
+MT_wide <- MT_SALIVA %>% filter(sample_type =="Midturbinate Swab")
+MT_SALIVA_wide <- left_join(MT_wide, saliva_ct, by=c("study_id","sample_date"))
+
+
+MT_SALIVA_wide <- MT_SALIVA_wide %>% 
+  mutate(pos_test = if_else(positivity_saliva==1|positivity==1, 1, 0))
+
+#subset the MT_SALIVA_wide dataset to only those became positive later
+MT_SALIVA_wide_POSITIVE <- MT_SALIVA_wide %>% 
+  right_join(positive_list)
+
+
+#subset the MT_SALIVA_wide_POSITIVE dataset to only those symptomatic
+MT_SALIVA_wide_POSITIVE_symptomatic <- MT_SALIVA_wide_POSITIVE %>% 
+  filter(symptom == 1)
+
+```
+
+
+#The distribution of positivity by sample_type
+```{r}
+tab_xtab(MT_SALIVA$positivity, MT_SALIVA$sample_type,
+         var.labels = c("Positivity", "Sample Type"),
+         file = "../output/table_s1_assoc_freq_sample_types.doc")
+```
+
+#2 by 2 table between saliva and MTS
+```{r}
+tab_xtab(MT_SALIVA_wide$positivity_saliva, MT_SALIVA_wide$positivity,
+         var.labels = c("Saliva Positivity", "MTS Positivity"),
+         show.summary = F,
+         file = "../output/table_2_positivity_count.doc")
+length(unique(MT_SALIVA_wide$study_id))
+
+#among positive participants
+tab_xtab(MT_SALIVA_wide_POSITIVE$positivity_saliva, MT_SALIVA_wide_POSITIVE$positivity,
+         var.labels = c("Saliva Positivity", "MTS Positivity"),
+         show.summary = F,
+         file = "../output/table_s3a_positivity_count_pos.doc")
+length(unique(MT_SALIVA_wide_POSITIVE$study_id))
+
+#among symptomatic positive participants
+tab_xtab(MT_SALIVA_wide_POSITIVE_symptomatic$positivity_saliva, MT_SALIVA_wide_POSITIVE_symptomatic$positivity,
+         var.labels = c("Saliva Positivity", "MTS Positivity"),
+         show.summary = F,
+         file = "../output/table_s3b_positivity_count_pos_sympt.doc")
+length(unique(MT_SALIVA_wide_POSITIVE_symptomatic$study_id))
+```
+
+#kappa statistic
+```{r}
+#MT_SALIVA_wide
+mt.saliva <- data.frame(MT_SALIVA_wide$positivity_saliva,MT_SALIVA_wide$positivity)
+mt.saliva.ck <- cohen.kappa(mt.saliva)
+mt.saliva.ck
+mt.saliva.ck$agree
+kappa_table2 <- paste("a. κ=", round(mt.saliva.ck$weighted.kappa,2))
+write(kappa_table2,file="../output/table_2_positivity_count.doc",append=TRUE)
+
+#among positive participants
+mt.saliva.pos <- data.frame(MT_SALIVA_wide_POSITIVE$positivity_saliva,MT_SALIVA_wide_POSITIVE$positivity)
+mt.saliva.pos.ck <- cohen.kappa(mt.saliva.pos)
+mt.saliva.pos.ck
+mt.saliva.pos.ck$agree
+mt.saliva.pos.ck$weighted.kappa
+kappa_table_s3a <- paste("a. κ=", round(mt.saliva.pos.ck$weighted.kappa,2))
+write(kappa_table_s3a,file="../output/table_s3a_positivity_count_pos.doc",append=TRUE)
+
+#among symptomatic positive participants
+mt.saliva.pos.sym <- data.frame(MT_SALIVA_wide_POSITIVE_symptomatic$positivity_saliva,MT_SALIVA_wide_POSITIVE_symptomatic$positivity)
+mt.saliva.pos.sym.ck <- cohen.kappa(mt.saliva.pos.sym)
+mt.saliva.pos.sym.ck
+mt.saliva.pos.sym.ck$agree
+mt.saliva.pos.sym.ck$weighted.kappa
+kappa_table_s3b <- paste("a. κ=", round(mt.saliva.pos.sym.ck$weighted.kappa,2))
+write(kappa_table_s3b,file="../output/table_s3b_positivity_count_pos_sympt.doc",append=TRUE)
+```
+

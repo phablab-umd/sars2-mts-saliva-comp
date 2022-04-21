@@ -1,0 +1,47 @@
+---
+title: "ct_plot_by_sample_type"
+author: "Jianyu"
+date: "8/16/2021"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggpubr)
+set.seed(42)
+```
+
+#Create two subsets containing only paired ANS&saliva (ANS_SALIVA), and paired MT&saliva (MT_SALIVA)
+```{r}
+pcr_screen_salivaswab <- read.csv(file = "../data/pcr_screen_salivaswab_1.csv")
+
+MT <- pcr_screen_salivaswab %>% filter(sample_type == "Midturbinate Swab") %>% select(study_id, sample_date)
+saliva <- pcr_screen_salivaswab %>% filter(sample_type == "Saliva") %>% select(study_id, sample_date)
+
+MT_SALIVA <- left_join(intersect(MT, saliva), pcr_screen_salivaswab, by=c("study_id","sample_date"))  %>% filter(sample_type %in% c("Saliva","Midturbinate Swab"))
+
+```
+
+##plot the distribution of CT values for the paired datasets
+#violin plots
+```{r}
+MT_SALIVA$sample_type <- factor(MT_SALIVA$sample_type,
+levels = c("Saliva","Midturbinate Swab"),
+labels = c("Saliva","MTS"))
+
+MT_SALIVA_ct_plot <- MT_SALIVA %>% 
+  ggplot(aes(x=sample_type, y=ct_avg_screen))+
+  geom_violin(fill="blue")+
+  labs (x="Sample Types", y="Average Ct value")+
+  ylim(10, 40)+
+  theme_bw() +
+  theme(axis.title = element_text(size = 15),
+        axis.text = element_text(size = 13))
+
+MT_SALIVA_ct_plot
+ggsave(MT_SALIVA_ct_plot,filename="../output/figure_s1_ct_plot_by_sample_type.png",device="png",width=11,height=7.77,units="in")
+```
+
+

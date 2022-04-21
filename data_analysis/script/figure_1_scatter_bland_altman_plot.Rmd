@@ -1,0 +1,165 @@
+---
+title: "scatter_bland_altman_plot"
+author: "Jianyu"
+date: "8/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(blandr)
+library(BlandAltmanLeh)
+library(ggpubr)
+set.seed(42)
+```
+
+#PAIRED MTS AND SALIVA
+```{r}
+#create a dataset containing only paired saliva and mt
+pcr_screen_salivaswab <- read.csv(file = "../data/pcr_screen_salivaswab_1.csv")
+MT <- pcr_screen_salivaswab %>% filter(sample_type == "Midturbinate Swab") %>% select(study_id, sample_date)
+saliva <- pcr_screen_salivaswab %>% filter(sample_type == "Saliva") %>% select(study_id, sample_date)
+MT_SALIVA <- left_join(intersect(MT, saliva), pcr_screen_salivaswab, by=c("study_id","sample_date"))  %>% filter(sample_type %in% c("Saliva","Midturbinate Swab"))
+
+#create "pos" variable indicating positivity
+ctscreencols <- c("ct_ngene_screen","ct_sgene_screen","ct_orf1ab_screen")
+MT_SALIVA$pos <- MT_SALIVA[,ctscreencols] %>% apply(c(1,2),function(x) {x<40}) %>% apply(1,function(x) {sum(x)>=2})
+
+MT_SALIVA <- MT_SALIVA %>% 
+  mutate(positivity = as.factor(if_else(pos==TRUE, 1, 0)))
+```
+
+#WIDE VERSION
+```{r}
+saliva_ct<- MT_SALIVA %>% 
+  filter(sample_type == "Saliva") %>% 
+  select(study_id, sample_date, positivity, ct_avg_screen) %>% 
+  rename(positivity_saliva = positivity, 
+         ct_avg_screen_saliva=ct_avg_screen)
+MT_wide <- MT_SALIVA %>% filter(sample_type =="Midturbinate Swab")
+MT_SALIVA_wide <- left_join(MT_wide, saliva_ct, by=c("study_id","sample_date"))
+
+```
+#T-test
+```{r}
+#paired t-test for MT-SALIVA and ANS-SALIVA
+t_mt_saliva <- t.test(MT_SALIVA_wide$ct_avg_screen_saliva, 
+       MT_SALIVA_wide$ct_avg_screen, 
+       paired=TRUE)
+t_mt_saliva
+
+```
+#simple linear regression - Coefficient of determination
+#Spearman correlation
+```{r}
+lm_mt_saliva_simple = lm(ct_avg_screen ~ ct_avg_screen_saliva, data=MT_SALIVA_wide)
+s <-summary(lm_mt_saliva_simple)
+summary(lm_mt_saliva_simple)$coefficients
+
+cor_pearson<-cor(MT_SALIVA_wide$ct_avg_screen, MT_SALIVA_wide$ct_avg_screen_saliva, method = "pearson")
+```
+
+
+# Scatter plot and linear regression to inspect the data
+```{r}
+note1 <- paste("            Estimate  SE   t value  P-value","\n",
+              "Intercept  ",signif(s$coefficients[1,1], digits = 2), "  ",
+              signif(s$coefficients[1,2], digits = 2),"  ",
+              signif(s$coefficients[1,3], digits = 2)," ",
+              signif(s$coefficients[1,4], digits = 2),"\n",
+              "Saliva Ct  ",signif(s$coefficients[2,1], digits = 2), "   ",
+              signif(s$coefficients[2,2], digits = 2),"  ",
+              signif(s$coefficients[2,3], digits = 2),"  ",
+              signif(s$coefficients[2,4], digits = 2),"\n",
+              "R-squared =", round(s$r.squared, 2),"\n","\n",
+              "Pearson Correlation Coefficient =", round(cor_pearson, 2)
+             )
+scatter_mt_saliva <- MT_SALIVA_wide %>% 
+  ggplot(aes(x=ct_avg_screen_saliva, y=ct_avg_screen)) +
+  geom_point()+
+  #stat_smooth(method="lm", se=F)+
+  labs(x="Saliva Ct Value", y="MTS Ct Value")+
+  annotate("text",x=15,y=35,label=note1,hjust=0,family="sans",size=4, fontface = 2)+
+  coord_cartesian(ylim=c(10, 41), xlim = c(14,41), expand = F)+
+  theme_bw()+
+  theme(axis.title = element_text(size = 12, family = "sans"),
+        axis.text = element_text(size = 10, family = "sans"))
+scatter_mt_saliva
+
+```
+#Bland Altman statistics
+```{r}
+stats.data <- blandr.statistics ( MT_SALIVA_wide$ct_avg_screen_saliva, MT_SALIVA_wide$ct_avg_screen, sig.level=0.95 )
+summary(stats.data)
+
+bland_altman_plot1 <- blandr.draw( MT_SALIVA_wide$ct_avg_screen_saliva, MT_SALIVA_wide$ct_avg_screen, plotTitle = NULL)+
+  theme_bw()
+```
+
+#another way of creating the plot using ggplot
+```{r}
+#create new column for average measurement: avg
+#create new column for difference in measurements: diff
+MT_SALIVA_wide <- MT_SALIVA_wide %>% 
+  mutate(avg = rowMeans(cbind(ct_avg_screen_saliva, ct_avg_screen)),
+         diff = ct_avg_screen_saliva-ct_avg_screen)
+
+#find average difference
+mean_diff <- mean(MT_SALIVA_wide$diff)
+
+mean_diff #-0.6355
+
+#find lower 95% confidence interval limits
+lower <- mean_diff - 1.96*sd(MT_SALIVA_wide$diff)
+
+lower #-7.742366
+
+#find upper 95% confidence interval limits
+upper <- mean_diff + 1.96*sd(MT_SALIVA_wide$diff)
+
+upper #6.471366
+
+#create Bland-Altman plot
+note2<- paste(
+              "Results of Paired T-Test\n",
+             "        T Satistic =", round(t_mt_saliva$statistic,2),"\n",
+             "        Degree of freedom =", round(t_mt_saliva$parameter,2),"\n",
+             "        P-value =",round(t_mt_saliva$p.value,5)
+             )
+bland_altman_plot <- ggplot(MT_SALIVA_wide, aes(x = avg, y = diff)) +
+  geom_point(size=2) +
+  geom_smooth(alpha=0.2, size=0.8, span=1)+
+  geom_hline(yintercept = mean_diff) +
+  geom_hline(yintercept = lower, color = "red", linetype="dashed") +
+  geom_hline(yintercept = upper, color = "red", linetype="dashed") +
+  ylab("Difference Between Ct values (Saliva - MTS)") +
+  xlab("Average Ct values of saliva and MTS")+
+  annotate("text",x=15,y=18,label=note2,hjust=0,family="sans",size=4, fontface = 2)+
+  coord_cartesian(ylim=c(-15, 25), xlim = c(14,41), expand = F)+
+  theme_bw()+
+  theme(axis.title = element_text(size = 12, family = "sans"),
+        axis.text = element_text(size = 10, family = "sans"))
+bland_altman_plot
+
+
+
+figure_1 <- ggarrange (scatter_mt_saliva,bland_altman_plot,
+                       labels = c("A", "B"),
+                       ncol=1, nrow=2,
+                       common.legend = T,
+                       widths = 1,
+                       heights = 2,
+                       legend = "right",
+                       align = "v",
+                       hjust = -1.4,
+                       vjust = 1.0)
+figure_1
+ggsave(figure_1,filename="../output/tiff/figure_1_scatter_bland_altman.tiff",device="tiff",width=11,height=7.77,units="in",dpi=600,compression="lzw")
+ggsave(figure_1,filename="../output/figure_1_scatter_bland_altman.png",device="png",width=11,height=11,units="in")
+
+
+```
+
+
+

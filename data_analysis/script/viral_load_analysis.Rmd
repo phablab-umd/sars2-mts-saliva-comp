@@ -1,0 +1,495 @@
+---
+title: "viral_load_analysis"
+author: "Jianyu"
+date: "12/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Matrix)
+library(lme4)
+library(lmec)
+source("z_create_matrix.R")
+set.seed(42)
+```
+
+##Import qpcr_salivaswab_withimputes.csv and basic distribution
+```{r}
+qpcr_withimpute <- read.csv(file = "../data/qpcr_salivaswab_withimputes_1.csv")
+
+#create a dataset containing only paired saliva and mt
+MT_qpcr <- qpcr_withimpute %>% filter(sample_type == "Midturbinate Swab") %>% select(study_id, sample_date)
+saliva_qpcr <- qpcr_withimpute %>% filter(sample_type == "Saliva") %>% select(study_id, sample_date)
+MT_SALIVA_qpcr <- left_join(intersect(MT_qpcr, saliva_qpcr), qpcr_withimpute, by=c("study_id","sample_date"))  %>% filter(sample_type %in% c("Saliva","Midturbinate Swab"))
+
+#look at the distribution
+samp_df <- MT_SALIVA_qpcr %>% distinct(study_id, sample_date, sample_type) %>%
+  group_by(sample_type) %>%
+  summarize(Cases = length(unique(study_id)),`qPCR Samples` = n())
+samp_df
+```
+
+##GM and GSD for the viral load in each sample type for the 58 subjects
+## LMEC
+Cut individual sample type datasets
+```{r}
+pcr_dat_clean <- MT_SALIVA_qpcr %>% mutate(ln_final_copies=log(mdfy_sample_quant))
+pcrdatclean_sampletypes <- pcr_dat_clean$sample_type %>% unique()
+
+sarslist <- pcrdatclean_sampletypes %>% lapply(function(x) {pcr_dat_clean %>% filter(sample_type==x)})
+names(sarslist) <- pcrdatclean_sampletypes
+
+sarslist_sid_samp <- sarslist %>% lapply(function(x) {x %>% summarise(sid = n_distinct(study_id),samples = n_distinct(study_id,sample_date))})
+sarslist_sid_samp %>% unlist()
+```
+# Construct models and extract GM and GSD
+```{r}
+ef_est_reml_df_list <- list()
+
+for (q in pcrdatclean_sampletypes) {
+  
+  # MODEL FOR: 
+  print(q)
+  
+  sarsdataset <- sarslist[[q]]
+  Z_current <- z_create_matrix(sarsdataset)
+  vars <- c("intercept", "study_id") # naming for table creation later on.
+  X <- matrix(rep(1, length(sarsdataset$ln_final_copies)), ncol=1) #for intercept only
+  cluster <- as.numeric(as.factor(sarsdataset$study_id))
+  
+  #### MODEL: Running the LMEC procedures ####
+
+  fit_reml <- lmec(yL = sarsdataset$ln_final_copies,
+                  cens = sarsdataset$cens,
+                  X = X, 
+                  Z = Z_current,
+                  cluster=cluster,
+                  method='ML',
+                  maxstep=200)
+  summary(fit_reml)
+  print(fit_reml)
+  
+  #### Taking model parameter estimates and using to generate GM (GSD) and confidence interval ####
+  betas <- length(fit_reml$beta) 
+  n <- length(sarsdataset$study_id)
+  ef_est <- c()
+  low_ci <- c()
+  up_ci <- c()
+  ef_est_reml <- c()
+  
+  for (i in 1:betas) {
+                  beta <- fit_reml$beta[i]
+                  sigma <- sqrt(fit_reml$varFix[i])
+                  low_ci_fold_inc <- signif(exp(beta - 1.96*(sigma)), 2)
+                  up_ci_fold_inc <- signif(exp(beta + 1.96*(sigma)), 2)
+                  fold_inc <- signif(exp(beta), 2)
+                  var <- vars[i]
+                  fold_inc_var <- cbind(var, fold_inc, low_ci_fold_inc, up_ci_fold_inc)
+                  ef_est_reml <- rbind(ef_est_reml, fold_inc_var)
+  }
+  
+  ef_est_reml_df <- as.data.frame(ef_est_reml) %>%
+                  mutate(fold_inc = formatC(as.numeric(as.character(fold_inc)), format = "e", digits = 1),
+                         low_ci_fold_inc = formatC(as.numeric(as.character(low_ci_fold_inc)), format = "e", digits = 1),
+                         up_ci_fold_inc = formatC(as.numeric(as.character(up_ci_fold_inc)), format = "e", digits = 1)) %>% 
+                  unite("95% CI", low_ci_fold_inc, up_ci_fold_inc, sep = ", ") %>%
+                  mutate(`95% CI` = paste0("(", `95% CI`, ")")) %>%
+                  unite("effect_ci",  fold_inc, `95% CI`, sep = " ") %>%
+                  mutate(gsd = signif(exp(fit_reml$sigma), digits = 2))
+  
+  print(ef_est_reml_df)
+  ef_est_reml_df_list[[q]] <- ef_est_reml_df
+
+}
+```
+
+## Final GM table
+```{r}
+gm_table1 <- bind_rows(ef_est_reml_df_list)
+gm_table1$`Sample Type` <- names(ef_est_reml_df_list)
+gm_table1 <- gm_table1 %>% arrange(`Sample Type`)
+gm_table1 <- gm_table1 %>% rename(`GM (95% CI)` = effect_ci,`GSD` = gsd) %>% select(`Sample Type`,`GM (95% CI)`,`GSD`)
+gm_table1
+
+write.csv(gm_table1,file="../output/total_58_viral_gm_gsd.csv",row.names = F)
+```
+
+###Look at the viral load detected by each sample type for the 14 positive cases
+```{r}
+#create "pos" variable indicating positivity
+ctscreencols <- c("ct_ngene_screen","ct_sgene_screen","ct_orf1ab_screen")
+pcr_dat_clean$pos <- pcr_dat_clean[,ctscreencols] %>% apply(c(1,2),function(x) {x<40}) %>% apply(1,function(x) {sum(x)>=2})
+
+pcr_dat_clean <- pcr_dat_clean %>% 
+  mutate(positivity = as.numeric(if_else(pos==TRUE, 1, 0)))
+
+#create a list of people who became positive by either test
+positive_list <- pcr_dat_clean %>% 
+  filter(pos == TRUE) %>% 
+  select(study_id) %>% 
+  unique()
+nrow(positive_list)
+
+
+#subset the pcr_dat_clean dataset to only those became positive later
+pcr_dat_clean_POSITIVE <- pcr_dat_clean %>% 
+  right_join(positive_list)
+
+length(unique(pcr_dat_clean_POSITIVE$study_id))
+
+##create a variable named "days since symptom onset"
+demo <- readRDS("../data/demohist_salivaswab_1.RDS")
+
+#extract the real_onset from the "demo" dataset and join to the pcr_dat_clean_POSITIVE
+demo <- demo %>% select(study_id, real_onset)
+pcr_dat_clean_POSITIVE <- pcr_dat_clean_POSITIVE %>% 
+  mutate(study_id=as.character(study_id)) %>% 
+  left_join(demo, by="study_id")
+
+pcr_dat_clean_POSITIVE <- pcr_dat_clean_POSITIVE %>% 
+  mutate(days_since_symptom_onset = as.numeric(sample_date)- as.numeric(real_onset))
+
+#create a subset removing "413" because of no symptom
+pcr_dat_clean_POSITIVE_sub <- pcr_dat_clean_POSITIVE %>% 
+  filter(study_id != "413")
+length(unique(pcr_dat_clean_POSITIVE_sub$study_id))
+```
+
+
+##GM and GSD for the viral load in each sample type for the 14 positive cases
+## LMEC
+Cut individual sample type datasets
+```{r}
+
+sarslist2 <- pcrdatclean_sampletypes %>% lapply(function(x) {pcr_dat_clean_POSITIVE %>% filter(sample_type==x)})
+names(sarslist2) <- pcrdatclean_sampletypes
+
+sarslist_sid_samp2 <- sarslist2 %>% lapply(function(x) {x %>% summarise(sid = n_distinct(study_id),samples = n_distinct(study_id,sample_date))})
+sarslist_sid_samp2 %>% unlist()
+```
+# Construct models and extract GM and GSD
+```{r}
+ef_est_reml_df_list <- list()
+
+for (q in pcrdatclean_sampletypes) {
+  
+  # MODEL FOR: 
+  print(q)
+  
+  sarsdataset <- sarslist2[[q]]
+  Z_current <- z_create_matrix(sarsdataset)
+  vars <- c("intercept", "study_id") # naming for table creation later on.
+  X <- matrix(rep(1, length(sarsdataset$ln_final_copies)), ncol=1) #for intercept only
+  cluster <- as.numeric(as.factor(sarsdataset$study_id))
+  
+  #### MODEL: Running the LMEC procedures ####
+
+  fit_reml <- lmec(yL = sarsdataset$ln_final_copies,
+                  cens = sarsdataset$cens,
+                  X = X, 
+                  Z = Z_current,
+                  cluster=cluster,
+                  method='ML',
+                  maxstep=200)
+  summary(fit_reml)
+  print(fit_reml)
+  
+  #### Taking model parameter estimates and using to generate GM (GSD) and confidence interval ####
+  betas <- length(fit_reml$beta) 
+  n <- length(sarsdataset$study_id)
+  ef_est <- c()
+  low_ci <- c()
+  up_ci <- c()
+  ef_est_reml <- c()
+  
+  for (i in 1:betas) {
+                  beta <- fit_reml$beta[i]
+                  sigma <- sqrt(fit_reml$varFix[i])
+                  low_ci_fold_inc <- signif(exp(beta - 1.96*(sigma)), 2)
+                  up_ci_fold_inc <- signif(exp(beta + 1.96*(sigma)), 2)
+                  fold_inc <- signif(exp(beta), 2)
+                  var <- vars[i]
+                  fold_inc_var <- cbind(var, fold_inc, low_ci_fold_inc, up_ci_fold_inc)
+                  ef_est_reml <- rbind(ef_est_reml, fold_inc_var)
+  }
+  
+  ef_est_reml_df <- as.data.frame(ef_est_reml) %>%
+                  mutate(fold_inc = formatC(as.numeric(as.character(fold_inc)), format = "e", digits = 1),
+                         low_ci_fold_inc = formatC(as.numeric(as.character(low_ci_fold_inc)), format = "e", digits = 1),
+                         up_ci_fold_inc = formatC(as.numeric(as.character(up_ci_fold_inc)), format = "e", digits = 1)) %>% 
+                  unite("95% CI", low_ci_fold_inc, up_ci_fold_inc, sep = ", ") %>%
+                  mutate(`95% CI` = paste0("(", `95% CI`, ")")) %>%
+                  unite("effect_ci",  fold_inc, `95% CI`, sep = " ") %>%
+                  mutate(gsd = signif(exp(fit_reml$sigma), digits = 2))
+  
+  print(ef_est_reml_df)
+  ef_est_reml_df_list[[q]] <- ef_est_reml_df
+
+}
+```
+## Final GM table
+```{r}
+gm_table2 <- bind_rows(ef_est_reml_df_list)
+gm_table2$`Sample Type` <- names(ef_est_reml_df_list)
+gm_table2 <- gm_table2 %>% arrange(`Sample Type`)
+gm_table2 <- gm_table2 %>% rename(`GM (95% CI)` = effect_ci,`GSD` = gsd) %>% select(`Sample Type`,`GM (95% CI)`,`GSD`)
+gm_table2
+
+write.csv(gm_table2,file="../output/tables2b_total_14_viral_gm_gsd.csv",row.names = F)
+```
+
+##GM and GSD for the viral load in each sample type for the 13 positive cases
+## LMEC
+Cut individual sample type datasets
+```{r}
+
+sarslist3 <- pcrdatclean_sampletypes %>% lapply(function(x) {pcr_dat_clean_POSITIVE_sub %>% filter(sample_type==x)})
+names(sarslist3) <- pcrdatclean_sampletypes
+
+sarslist_sid_samp2 <- sarslist3 %>% lapply(function(x) {x %>% summarise(sid = n_distinct(study_id),samples = n_distinct(study_id,sample_date))})
+sarslist_sid_samp2 %>% unlist()
+```
+# Construct models and extract GM and GSD
+```{r}
+ef_est_reml_df_list <- list()
+
+for (q in pcrdatclean_sampletypes) {
+  
+  # MODEL FOR: 
+  print(q)
+  
+  sarsdataset <- sarslist3[[q]]
+  Z_current <- z_create_matrix(sarsdataset)
+  vars <- c("intercept", "study_id") # naming for table creation later on.
+  X <- matrix(rep(1, length(sarsdataset$ln_final_copies)), ncol=1) #for intercept only
+  cluster <- as.numeric(as.factor(sarsdataset$study_id))
+  
+  #### MODEL: Running the LMEC procedures ####
+
+  fit_reml <- lmec(yL = sarsdataset$ln_final_copies,
+                  cens = sarsdataset$cens,
+                  X = X, 
+                  Z = Z_current,
+                  cluster=cluster,
+                  method='ML',
+                  maxstep=200)
+  summary(fit_reml)
+  print(fit_reml)
+  
+  #### Taking model parameter estimates and using to generate GM (GSD) and confidence interval ####
+  betas <- length(fit_reml$beta) 
+  n <- length(sarsdataset$study_id)
+  ef_est <- c()
+  low_ci <- c()
+  up_ci <- c()
+  ef_est_reml <- c()
+  
+  for (i in 1:betas) {
+                  beta <- fit_reml$beta[i]
+                  sigma <- sqrt(fit_reml$varFix[i])
+                  low_ci_fold_inc <- signif(exp(beta - 1.96*(sigma)), 2)
+                  up_ci_fold_inc <- signif(exp(beta + 1.96*(sigma)), 2)
+                  fold_inc <- signif(exp(beta), 2)
+                  var <- vars[i]
+                  fold_inc_var <- cbind(var, fold_inc, low_ci_fold_inc, up_ci_fold_inc)
+                  ef_est_reml <- rbind(ef_est_reml, fold_inc_var)
+  }
+  
+  ef_est_reml_df <- as.data.frame(ef_est_reml) %>%
+                  mutate(fold_inc = formatC(as.numeric(as.character(fold_inc)), format = "e", digits = 1),
+                         low_ci_fold_inc = formatC(as.numeric(as.character(low_ci_fold_inc)), format = "e", digits = 1),
+                         up_ci_fold_inc = formatC(as.numeric(as.character(up_ci_fold_inc)), format = "e", digits = 1)) %>% 
+                  unite("95% CI", low_ci_fold_inc, up_ci_fold_inc, sep = ", ") %>%
+                  mutate(`95% CI` = paste0("(", `95% CI`, ")")) %>%
+                  unite("effect_ci",  fold_inc, `95% CI`, sep = " ") %>%
+                  mutate(gsd = signif(exp(fit_reml$sigma), digits = 2))
+  
+  print(ef_est_reml_df)
+  ef_est_reml_df_list[[q]] <- ef_est_reml_df
+
+}
+```
+## Final GM table
+```{r}
+gm_table3 <- bind_rows(ef_est_reml_df_list)
+gm_table3$`Sample Type` <- names(ef_est_reml_df_list)
+gm_table3 <- gm_table3 %>% arrange(`Sample Type`)
+gm_table3 <- gm_table3 %>% rename(`GM (95% CI)` = effect_ci,`GSD` = gsd) %>% select(`Sample Type`,`GM (95% CI)`,`GSD`)
+gm_table3
+
+write.csv(gm_table3,file="../output/total_13_viral_gm_gsd.csv",row.names = F)
+```
+
+##GM and GSD for the viral load in each sample type for the 14 positive cases - only positive samples
+## LMEC
+Cut individual sample type datasets
+```{r}
+sal_pos <- pcr_dat_clean_POSITIVE %>% filter(sample_type == "Saliva") %>% filter(positivity == 1)
+length(unique(sal_pos$sample_id))
+
+mts_pos <- pcr_dat_clean_POSITIVE %>% filter(sample_type == "Midturbinate Swab") %>% filter(positivity == 1)
+length(unique(mts_pos$sample_id))
+
+sarslist4 <- list(sal_pos, mts_pos)
+names(sarslist4) <- c("Saliva", "Midturbinate Swab")
+
+sarslist_sid_samp4 <- sarslist4 %>% lapply(function(x) {x %>% summarise(sid = n_distinct(study_id),samples = n_distinct(study_id,sample_date))})
+sarslist_sid_samp4 %>% unlist()
+```
+# Construct models and extract GM and GSD
+```{r}
+ef_est_reml_df_list <- list()
+
+for (q in pcrdatclean_sampletypes) {
+  
+  # MODEL FOR: 
+  print(q)
+  
+  sarsdataset <- sarslist4[[q]]
+  Z_current <- z_create_matrix(sarsdataset)
+  vars <- c("intercept", "study_id") # naming for table creation later on.
+  X <- matrix(rep(1, length(sarsdataset$ln_final_copies)), ncol=1) #for intercept only
+  cluster <- as.numeric(as.factor(sarsdataset$study_id))
+  
+  #### MODEL: Running the LMEC procedures ####
+
+  fit_reml <- lmec(yL = sarsdataset$ln_final_copies,
+                  cens = sarsdataset$cens,
+                  X = X, 
+                  Z = Z_current,
+                  cluster=cluster,
+                  method='ML',
+                  maxstep=200)
+  summary(fit_reml)
+  print(fit_reml)
+  
+  #### Taking model parameter estimates and using to generate GM (GSD) and confidence interval ####
+  betas <- length(fit_reml$beta) 
+  n <- length(sarsdataset$study_id)
+  ef_est <- c()
+  low_ci <- c()
+  up_ci <- c()
+  ef_est_reml <- c()
+  
+  for (i in 1:betas) {
+                  beta <- fit_reml$beta[i]
+                  sigma <- sqrt(fit_reml$varFix[i])
+                  low_ci_fold_inc <- signif(exp(beta - 1.96*(sigma)), 2)
+                  up_ci_fold_inc <- signif(exp(beta + 1.96*(sigma)), 2)
+                  fold_inc <- signif(exp(beta), 2)
+                  var <- vars[i]
+                  fold_inc_var <- cbind(var, fold_inc, low_ci_fold_inc, up_ci_fold_inc)
+                  ef_est_reml <- rbind(ef_est_reml, fold_inc_var)
+  }
+  
+  ef_est_reml_df <- as.data.frame(ef_est_reml) %>%
+                  mutate(fold_inc = formatC(as.numeric(as.character(fold_inc)), format = "e", digits = 1),
+                         low_ci_fold_inc = formatC(as.numeric(as.character(low_ci_fold_inc)), format = "e", digits = 1),
+                         up_ci_fold_inc = formatC(as.numeric(as.character(up_ci_fold_inc)), format = "e", digits = 1)) %>% 
+                  unite("95% CI", low_ci_fold_inc, up_ci_fold_inc, sep = ", ") %>%
+                  mutate(`95% CI` = paste0("(", `95% CI`, ")")) %>%
+                  unite("effect_ci",  fold_inc, `95% CI`, sep = " ") %>%
+                  mutate(gsd = signif(exp(fit_reml$sigma), digits = 2))
+  
+  print(ef_est_reml_df)
+  ef_est_reml_df_list[[q]] <- ef_est_reml_df
+
+}
+```
+## Final GM table
+```{r}
+gm_table4 <- bind_rows(ef_est_reml_df_list)
+gm_table4$`Sample Type` <- names(ef_est_reml_df_list)
+gm_table4 <- gm_table4 %>% arrange(`Sample Type`)
+gm_table4 <- gm_table4 %>% rename(`GM (95% CI)` = effect_ci,`GSD` = gsd) %>% select(`Sample Type`,`GM (95% CI)`,`GSD`)
+gm_table4
+
+write.csv(gm_table4,file="../output/tables2c_positive_samples_14_viral_gm_gsd.csv",row.names = F)
+```
+
+
+#Use lmec model to model the effect of sample_type and days since symptom onset
+```{r}
+z <- z_create_matrix(pcr_dat_clean_POSITIVE_sub)
+cluster <- as.numeric(factor(pcr_dat_clean_POSITIVE_sub$study_id))
+cens <- pcr_dat_clean_POSITIVE_sub$cens
+yL <- pcr_dat_clean_POSITIVE_sub$ln_final_copies
+
+est_ci_list <- c()
+lm <- lmer (yL ~ (1|study_id) + (1|study_id:sample_id) + sample_type, data=pcr_dat_clean_POSITIVE_sub)
+x_matrix <- getME(lm, "X")
+vars <- c("intercept", "Sample type")
+fit_ML <- lmec(yL=yL, cens=cens, X=x_matrix, Z=z, cluster=cluster, maxstep = 200, varstruct = "unstructured", method = "ML")
+
+
+                est <- fit_ML$beta[2]
+                se <- sqrt(diag(fit_ML$varFix))[2]
+                up <- est+1.96*se
+                low <- est-1.96*se
+                est_ci <- c("All", vars[2], est, low, up)
+                est_ci_list <- rbind(est_ci_list, est_ci)    
+
+
+```
+
+```{r}
+#model the effect of saliva on viral load for different periods
+tables7 <- function(day1, day2){
+  pcr_dat_clean_POSITIVE_sub <- pcr_dat_clean_POSITIVE_sub %>% 
+  mutate(period_day = if_else(days_since_symptom_onset>=day1 & days_since_symptom_onset<=day2, 1, 0))
+  sub_day <- pcr_dat_clean_POSITIVE_sub %>% 
+  filter(period_day==1)
+
+#test the association between sample type and positivity
+z <- z_create_matrix(sub_day)
+cluster <- as.numeric(factor(sub_day$study_id))
+cens <- sub_day$cens
+yL <- sub_day$ln_final_copies
+
+est_ci_list <- c()
+lm <- lmer (yL ~ (1|study_id) + (1|study_id:sample_id) + sample_type, data=sub_day)
+x_matrix <- getME(lm, "X")
+vars <- c("intercept", "Sample type")
+fit_ML <- lmec(yL=yL, cens=cens, X=x_matrix, Z=z, cluster=cluster, maxstep = 200, varstruct = "unstructured", method = "ML")
+
+
+                est <- fit_ML$beta[2]
+                se <- sqrt(diag(fit_ML$varFix))[2]
+                up <- est+1.96*se
+                low <- est-1.96*se
+                est_ci <- c(vars[2], est, low, up)
+                est_ci_list <- rbind(est_ci_list, est_ci)    
+est_ci_list
+
+note <- paste(day1,"to",day2)
+
+
+est_ci2 <- c(note, est_ci_list)
+return(est_ci2)
+}
+est_list_new <- rbind(tables7(-3, 2),tables7(3,8),tables7(9,24))
+est_list_new2<- rbind(est_ci_list, est_list_new)
+
+```
+
+output
+```{r}
+exptransform <- function(x) {
+  y <- exp(x) %>% signif(2)
+  return(y)
+}
+
+df_new <- est_list_new2 %>% as.data.frame(stringsAsFactors=F)
+colnames(df_new) <- c("Day", "sample type", "beta","ci_low","ci_high")
+df_new$beta_1 <- df_new$beta %>% as.numeric() %>% sapply(exptransform)
+df_new$ci_low_1 <- df_new$ci_low %>% as.numeric() %>% sapply(exptransform)
+df_new$ci_high_1 <- df_new$ci_high %>% as.numeric() %>% sapply(exptransform)
+df_new$predict1 <- df_new[,c("beta_1","ci_low_1","ci_high_1")] %>% apply(1,function(x) {paste0(x["beta_1"]," (",x["ci_low_1"],", ",x["ci_high_1"],")")})
+
+tables7 <- df_new %>% select(Day,predict1) %>% rename(`Days since symptom onset`=Day,
+                                                          `Estimates Saliva:MTS`=predict1)
+tables7
+write.csv(tables7,file="../output/table_3b_viral_load_estimates.csv",row.names = F)
+```

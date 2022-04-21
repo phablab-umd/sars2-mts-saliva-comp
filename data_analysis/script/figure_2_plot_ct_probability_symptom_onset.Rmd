@@ -1,0 +1,306 @@
+---
+title: "plot_probability_days_symptom_onset"
+author: "Jianyu"
+date: "9/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggpubr)
+library(nlme)
+library(mgcv)
+set.seed(42)
+```
+
+
+```{r}
+pcr_screen_salivaswab <- read.csv(file = "../data/pcr_screen_salivaswab_1.csv")
+demo <- readRDS("../data/demohist_salivaswab_1.RDS")
+
+#extract the real_onset from the "demo" dataset and join to the pcr_screen_salivaswab
+demo1 <- demo %>% select(study_id, real_onset)
+pcr_screen_salivaswab <- pcr_screen_salivaswab %>% 
+  mutate(study_id=as.character(study_id)) %>% 
+  left_join(demo1, by="study_id")
+
+#create a dataset containing only paired saliva and mt
+MT <- pcr_screen_salivaswab %>% filter(sample_type == "Midturbinate Swab") %>% select(study_id, sample_date)
+saliva <- pcr_screen_salivaswab %>% filter(sample_type == "Saliva") %>% select(study_id, sample_date)
+MT_SALIVA <- left_join(intersect(MT, saliva), pcr_screen_salivaswab, by=c("study_id","sample_date"))  %>% filter(sample_type %in% c("Saliva","Midturbinate Swab"))
+
+#create "pos" variable indicating positivity
+ctscreencols <- c("ct_ngene_screen","ct_sgene_screen","ct_orf1ab_screen")
+MT_SALIVA$pos <- MT_SALIVA[,ctscreencols] %>% apply(c(1,2),function(x) {x<40}) %>% apply(1,function(x) {sum(x)>=2})
+
+MT_SALIVA <- MT_SALIVA %>% 
+  mutate(positivity = as.numeric(if_else(pos==TRUE, 1, 0)))
+
+#create a list of people who became positive by either test
+positive_list <- MT_SALIVA %>% 
+  filter(pos == TRUE) %>% 
+  select(study_id) %>% 
+  unique()
+
+#subset the MT_SALIVA dataset to only those became positive later
+MT_SALIVA_POSITIVE <- MT_SALIVA %>% 
+  right_join(positive_list)
+
+length(unique(MT_SALIVA_POSITIVE$study_id))
+
+MT_SALIVA_POSITIVE <- MT_SALIVA_POSITIVE %>% mutate(days_since_symptom_onset = sample_date- as.numeric(real_onset))
+
+#remove "413" because of no symptom
+MT_SALIVA_POSITIVE_sub <- MT_SALIVA_POSITIVE %>% 
+  filter(study_id != "413")
+length(unique(MT_SALIVA_POSITIVE_sub$study_id))
+length(unique(MT_SALIVA_POSITIVE_sub$sample_id))
+```
+
+#plot the ct values over days since symptom onset
+```{r}
+
+reverse_ct_day_since_onset <- MT_SALIVA_POSITIVE_sub %>% 
+  ggplot(aes(x=days_since_symptom_onset, y=ct_avg_screen))+
+  geom_point(aes(color = sample_type, fill = sample_type), alpha = 0.6)+
+  geom_smooth(aes(color = sample_type, fill = sample_type), alpha=0.2, size=0.8, span=1)+
+  geom_rug(data = MT_SALIVA_POSITIVE_sub, sides="b", position = position_jitter(seed = 42), aes(color = sample_type)) +
+  labs (x="Days since symptom onset", 
+        y="Average Ct value",
+        color = "Sample Type", 
+        fill = "Sample Type")+
+  scale_x_continuous(breaks=c(-3, 0, 3, 6, 9, 12, 15, 18, 21, 24))+
+  scale_color_manual(labels = c("MTS", "Saliva"), values = c("#F8766D", "#00BFC4"))+
+  scale_fill_manual(labels = c("MTS", "Saliva"), values = c("#F8766D", "#00BFC4"))+
+  coord_cartesian(ylim = c(40, 15), xlim = c(-3,24))+
+  scale_y_reverse() +
+  theme_bw(base_size = 12, base_family = "sans")+
+  theme(axis.title = element_text(size = 15, family = "sans"),
+        axis.text = element_text(size = 13, family = "sans"))
+reverse_ct_day_since_onset
+
+
+```
+
+
+#Plot the probability of positivity vs days since symptom onset (individual plots)
+```{r}
+MT_POSITIVE_sub <- MT_SALIVA_POSITIVE_sub %>% 
+  filter(sample_type == "Midturbinate Swab")
+
+saliva_POSITIVE_sub <- MT_SALIVA_POSITIVE_sub %>% 
+  filter(sample_type == "Saliva")
+
+prob_mt <- gam( positivity ~ s(days_since_symptom_onset), data = MT_POSITIVE_sub, family = "binomial")
+summary(prob_mt)
+MT_POSITIVE_sub$prob2 <- prob_mt$fitted.values
+
+prob_sal <- gam(positivity ~ s(days_since_symptom_onset), data = saliva_POSITIVE_sub, family = "binomial")
+saliva_POSITIVE_sub$prob2 <- prob_sal$fitted.values
+
+mt_prob_day_since_onset_plot <- MT_POSITIVE_sub %>% 
+  ggplot(aes(x=days_since_symptom_onset, y=prob2))+
+  geom_line()+
+  labs (x="Days since symptom onset", y="Probability of testing positive")+
+  theme_bw()
+mt_prob_day_since_onset_plot
+
+
+sal_prob_day_since_onset_plot <- saliva_POSITIVE_sub %>% 
+  ggplot(aes(x=days_since_symptom_onset, y=prob2))+
+  geom_line()+
+  labs (x="Days since symptom onset", y="Probability of testing positive")+
+  theme_bw()
+sal_prob_day_since_onset_plot
+
+
+prob_day_since_onset_plot <- MT_POSITIVE_sub %>% 
+  ggplot(aes(x=days_since_symptom_onset, y=prob2))+
+  geom_line(aes(color="Midturbinate Swab"))+
+  geom_line(aes(x=saliva_POSITIVE_sub$days_since_symptom_onset, y=saliva_POSITIVE_sub$prob2, color = "Saliva"))+
+  labs (x="Days since symptom onset", y="Probability of testing positive",
+        color = "Sample Type")+
+  scale_x_continuous(breaks=c(-3, 0, 3, 6, 9, 12, 15, 18, 21, 24))+
+  scale_y_continuous(breaks=c(0, 0.25, 0.50, 0.75, 1.0), limits = (0:1.0))+
+  theme_bw(base_size = 12, base_family = "sans")
+prob_day_since_onset_plot
+
+```
+
+```{r}
+#Mt
+mt_max <- max(MT_POSITIVE_sub$days_since_symptom_onset)
+mt_min <- min(MT_POSITIVE_sub$days_since_symptom_onset)
+x_mt <- seq(mt_min, mt_max, 0.001)
+
+
+mt_impute <- data.frame(x_mt)
+mt_impute <- mt_impute %>% 
+  mutate(days_since_symptom_onset = x_mt)
+fit.pred.mt <- predict(prob_mt, newdata = mt_impute, se.fit = T,type = "response")
+
+mt_impute$prob2 <- fit.pred.mt$fit
+mt_impute$prob_se <- fit.pred.mt$se.fit
+
+mt_impute <- mt_impute %>% 
+  mutate(lower = prob2 - 1.96*prob_se, upper = prob2 + 1.96*prob_se)
+mt_impute <- mt_impute %>% mutate(lower=if_else(lower<0,0,lower),upper=if_else(upper>1,1,upper))
+
+
+#Saliva
+sal_max <- max(saliva_POSITIVE_sub$days_since_symptom_onset)
+sal_min <- min(saliva_POSITIVE_sub$days_since_symptom_onset)
+x_sal <- seq(sal_min, sal_max, 0.001)
+
+
+saliva_impute <- data.frame(x_sal)
+saliva_impute <- saliva_impute %>% 
+  mutate(days_since_symptom_onset = x_sal)
+fit.pred.sal <- predict(prob_sal, newdata = saliva_impute, se.fit = T,type = "response")
+saliva_impute$prob2 <- fit.pred.sal$fit
+saliva_impute$prob_se <- fit.pred.sal$se.fit
+
+saliva_impute <- saliva_impute %>% 
+  mutate(lower =  prob2 - 1.96*prob_se, upper = prob2 + 1.96*prob_se)
+saliva_impute <-saliva_impute %>% mutate(lower=if_else(lower<0,0,lower),upper=if_else(upper>1,1,upper))
+
+#note
+note <- paste("       Generalized Additive Logistic Models\n",
+              "                               MTS", "\n",
+              "                               ", " Coef", "   SE", "     z", "      p","\n",
+              "Intercept                  ", 
+              signif(summary(prob_mt)$p.coeff[1], digits = 2),"  ",
+              signif(summary(prob_mt)$se[1], digits = 2),"  ",
+              signif(summary(prob_mt)$p.t[1], digits = 2),"  ",
+              signif(summary(prob_mt)$p.pv[1], digits = 2),"\n",
+              "                               ", " edf", "  Chi.sq", "      p","\n",
+              "s(Days since onset)",
+              signif(summary(prob_mt)$edf, digits = 2),"  ",
+              signif(summary(prob_mt)$chi.sq, digits = 2),"    ",
+              signif(summary(prob_mt)$s.pv, digits = 2),"\n","\n",
+              "                               Saliva", "\n",
+              "                               ", " Coef", "   SE", "     z", "      p","\n",
+              "Intercept                  ", 
+              signif(summary(prob_sal)$p.coeff[1], digits = 2),"  ",
+              signif(summary(prob_sal)$se[1], digits = 2),"  ",
+              signif(summary(prob_sal)$p.t[1], digits = 2),"  ",
+              signif(summary(prob_sal)$p.pv[1], digits = 2),"\n",
+              "                               ", " edf", "  Chi.sq", "      p","\n",
+              "s(Days since onset)",
+              signif(summary(prob_sal)$edf, digits = 2),"   ",
+              signif(summary(prob_sal)$chi.sq, digits = 2),"    ",
+              signif(summary(prob_sal)$s.pv, digits = 2))
+
+
+MT_SALIVA_POSITIVE_sub2 <- MT_SALIVA_POSITIVE_sub %>% 
+  left_join((MT_POSITIVE_sub %>% select(study_id, sample_date, sample_type, prob2)), by=c("study_id", "sample_date", "sample_type"))%>%
+  left_join((saliva_POSITIVE_sub %>% select(study_id, sample_date, sample_type, prob2)), by=c("study_id", "sample_date", "sample_type")) %>% 
+  mutate(prob2 = if_else(is.na(prob2.x),prob2.y, prob2.x),
+         pos_color = if_else(sample_type=="Saliva", "Saliva", "MTS"))
+
+prob_day_since_onset_plot_band <- mt_impute %>% 
+  ggplot(aes(x=days_since_symptom_onset, y=prob2))+
+  geom_line(aes(color="MTS"), size=0.7) +
+  geom_ribbon(aes(y=NULL,ymin=lower,ymax=upper, fill = "MTS"),alpha=0.2) +
+  geom_line(aes(x=saliva_impute$days_since_symptom_onset, y=saliva_impute$prob2, color = "Saliva"), size=0.7) +
+  geom_ribbon(aes(y=NULL,ymin=saliva_impute$lower,ymax=saliva_impute$upper, fill = "Saliva"),alpha=0.2)+
+  geom_rug(data = MT_SALIVA_POSITIVE_sub2, sides="b", position = position_jitter(seed = 42), aes(color = pos_color)) +
+  labs (x="Days since symptom onset", 
+        y="Probability of testing positive",
+        color = "Sample Type", 
+        fill = "Sample Type")+
+  scale_x_continuous(breaks=c(-3, 0, 3, 6, 9, 12, 15, 18, 21, 24))+
+  scale_y_continuous(breaks=c(0, 0.25, 0.50, 0.75, 1.0), limits = (0:1.0))+
+  scale_color_manual(labels = c("MTS", "Saliva"), values = c('#F8766D', '#00BFC4'))+
+  scale_fill_manual(labels = c("MTS", "Saliva"), values = c('#F8766D', '#00BFC4'))+
+  coord_cartesian(xlim = c(-3,24))+
+  annotate("text", x=-4,y=.25,label=note, hjust=0,family="sans",size=3, fontface = 2)+
+  theme_bw(base_size = 12, base_family = "sans")+
+  theme(axis.title = element_text(size = 15, family = "sans"),
+        axis.text = element_text(size = 13, family = "sans"))
+prob_day_since_onset_plot_band
+
+```
+#plot the viral load over days since symptom onset
+#prep the dataset
+```{r}
+qpcr_withimpute <- read.csv(file = "../data/qpcr_salivaswab_withimputes_1.csv")
+
+#create a dataset containing only paired saliva and mt
+MT_qpcr <- qpcr_withimpute %>% filter(sample_type == "Midturbinate Swab") %>% select(study_id, sample_date)
+saliva_qpcr <- qpcr_withimpute %>% filter(sample_type == "Saliva") %>% select(study_id, sample_date)
+MT_SALIVA_qpcr <- left_join(intersect(MT_qpcr, saliva_qpcr), qpcr_withimpute, by=c("study_id","sample_date"))  %>% filter(sample_type %in% c("Saliva","Midturbinate Swab"))
+pcr_dat_clean <- MT_SALIVA_qpcr %>% mutate(ln_final_copies=log(mdfy_sample_quant))
+
+#create "pos" variable indicating positivity
+ctscreencols <- c("ct_ngene_screen","ct_sgene_screen","ct_orf1ab_screen")
+pcr_dat_clean$pos <- pcr_dat_clean[,ctscreencols] %>% apply(c(1,2),function(x) {x<40}) %>% apply(1,function(x) {sum(x)>=2})
+
+pcr_dat_clean <- pcr_dat_clean %>% 
+  mutate(positivity = as.numeric(if_else(pos==TRUE, 1, 0)))
+
+#create a list of people who became positive by either test
+positive_list <- pcr_dat_clean %>% 
+  filter(pos == TRUE) %>% 
+  select(study_id) %>% 
+  unique()
+nrow(positive_list)
+
+#subset the pcr_dat_clean dataset to only those became positive later
+pcr_dat_clean_POSITIVE <- pcr_dat_clean %>% 
+  right_join(positive_list)
+
+length(unique(pcr_dat_clean_POSITIVE$study_id))
+
+#extract the real_onset from the "demo" dataset and join to the pcr_dat_clean_POSITIVE
+pcr_dat_clean_POSITIVE <- pcr_dat_clean_POSITIVE %>% 
+  mutate(study_id=as.character(study_id)) %>% 
+  left_join(demo1, by="study_id")
+
+pcr_dat_clean_POSITIVE <- pcr_dat_clean_POSITIVE %>% 
+  mutate(days_since_symptom_onset = as.numeric(sample_date)- real_onset)
+
+#create a subset removing "413" because of no symptom
+pcr_dat_clean_POSITIVE_sub <- pcr_dat_clean_POSITIVE %>% 
+  filter(study_id != "413")
+length(unique(pcr_dat_clean_POSITIVE_sub$study_id))
+```
+#Create the plot
+```{r}
+max <- max(pcr_dat_clean_POSITIVE_sub$ln_final_copies)
+min <- min(pcr_dat_clean_POSITIVE_sub$ln_final_copies)
+viral_load_day_since_onset <- pcr_dat_clean_POSITIVE_sub %>% 
+  ggplot(aes(x=days_since_symptom_onset, y=ln_final_copies))+
+  geom_point(aes(color = sample_type, fill = sample_type), alpha = 0.6)+
+  geom_smooth(aes(color = sample_type, fill = sample_type), alpha=0.2, size=0.8, span=1)+
+  geom_rug(data = pcr_dat_clean_POSITIVE_sub, sides="b", position = position_jitter(seed = 42), aes(color = sample_type)) +
+  labs (x="Days since symptom onset", 
+        y="log(viral RNA copies)",
+        color = "Sample Type", 
+        fill = "Sample Type")+
+  scale_x_continuous(breaks=c(-3, 0, 3, 6, 9, 12, 15, 18, 21, 24))+
+  scale_color_manual(labels = c("MTS", "Saliva"), values = c("#F8766D", "#00BFC4"))+
+  scale_fill_manual(labels = c("MTS", "Saliva"), values = c("#F8766D", "#00BFC4"))+
+  coord_cartesian(ylim = c(min, max), xlim = c(-3,24))+
+  theme_bw(base_size = 12, base_family = "sans")+
+  theme(axis.title = element_text(size = 15, family = "sans"),
+        axis.text = element_text(size = 13, family = "sans"))
+viral_load_day_since_onset
+```
+
+#combine the plots together
+```{r}
+figure_2 <- ggarrange (reverse_ct_day_since_onset, viral_load_day_since_onset, prob_day_since_onset_plot_band,
+                       labels = c("A", "B", "C"),
+                       ncol=3, nrow=1,
+                       common.legend = T,
+                       legend = "bottom",
+                       align = "v")
+figure_2
+ggsave(figure_2,filename="../output/figure_2_plot_ct_probability_symptom_onset.png",device="png",width=11,height=7.77,units="in")
+ggsave(figure_2,filename="../output/tiff/figure_2_plot_ct_probability_symptom_onset.tiff",device="tiff",width=11,height=7.77,units="in",compression="lzw")
+
+```
+
+
